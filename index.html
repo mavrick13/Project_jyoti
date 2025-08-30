@@ -1,0 +1,526 @@
+<script type="text/javascript">
+        var gk_isXlsx = false;
+        var gk_xlsxFileLookup = {};
+        var gk_fileData = {};
+        function filledCell(cell) {
+          return cell !== '' && cell != null;
+        }
+        function loadFileData(filename) {
+        if (gk_isXlsx && gk_xlsxFileLookup[filename]) {
+            try {
+                var workbook = XLSX.read(gk_fileData[filename], { type: 'base64' });
+                var firstSheetName = workbook.SheetNames[0];
+                var worksheet = workbook.Sheets[firstSheetName];
+
+                // Convert sheet to JSON to filter blank rows
+                var jsonData = XLSX.utils.sheet_to_json(worksheet, { header: 1, blankrows: false, defval: '' });
+                // Filter out blank rows (rows where all cells are empty, null, or undefined)
+                var filteredData = jsonData.filter(row => row.some(filledCell));
+
+                // Heuristic to find the header row by ignoring rows with fewer filled cells than the next row
+                var headerRowIndex = filteredData.findIndex((row, index) =>
+                  row.filter(filledCell).length >= filteredData[index + 1]?.filter(filledCell).length
+                );
+                // Fallback
+                if (headerRowIndex === -1 || headerRowIndex > 25) {
+                  headerRowIndex = 0;
+                }
+
+                // Convert filtered JSON back to CSV
+                var csv = XLSX.utils.aoa_to_sheet(filteredData.slice(headerRowIndex)); // Create a new sheet from filtered array of arrays
+                csv = XLSX.utils.sheet_to_csv(csv, { header: 1 });
+                return csv;
+            } catch (e) {
+                console.error(e);
+                return "";
+            }
+        }
+        return gk_fileData[filename] || "";
+        }
+        </script><!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Jyoti Electrotech Platform</title>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/prop-types/15.8.1/prop-types.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/axios@1.4.0/dist/axios.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/socket.io-client@4.5.1/dist/socket.io.min.js"></script>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.2/babel.min.js"></script>
+  <script src="https://unpkg.com/papaparse@latest/papaparse.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/chrono-node/1.3.11/chrono.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/recharts/2.15.0/Recharts.min.js"></script>
+</head>
+<body class="bg-gray-100">
+  <div id="root"></div>
+  <script type="text/babel">
+    const { useState, useEffect } = React;
+
+    // Initialize Socket.IO
+    const socket = io('http://localhost:5000'); // Replace with your WebContainer Socket.IO backend URL if different
+
+    // Parse dates safely
+    const parseDate = (dateStr) => {
+      if (!dateStr || typeof dateStr !== 'string') return null;
+      const parsed = chrono.parseDate(dateStr);
+      return parsed ? parsed.toISOString().split('T')[0] : null;
+    };
+
+    // Process farmer data from Excel
+    const processFarmerData = (data) => {
+      return data.map(row => {
+        const cleanedRow = {};
+        cleanedRow.beneficiaryId = row["Application Number"]?.trim() || '';
+        cleanedRow.name = row["Farmer Name"]?.trim() || '';
+        cleanedRow.phoneNo = row["Mobile Number"]?.trim() || '';
+        cleanedRow.aadharNo = ''; // Not available
+        cleanedRow.scheme = row["Yojna"]?.trim() || row["scheme"]?.trim()?.toUpperCase() || '';
+        cleanedRow.selectionDate = parseDate(row["Selection Date"]) || '';
+        cleanedRow.circleName = row["Circle"]?.trim() || '';
+        cleanedRow.talukaName = row["Taluka"]?.trim() || '';
+        cleanedRow.villageName = row["Village"]?.trim() || '';
+        cleanedRow.installer = row["Installer Name"]?.trim() || row["INSTALLER"]?.trim() || row["CP"]?.trim() || '';
+        cleanedRow.jsrStatus = row["JSR OUTCOME ACCEPTED"]?.trim() || row["jsr"]?.trim()?.toUpperCase() || 'Pending';
+        cleanedRow.dispatchStatus = row["Dispatch"]?.trim()?.toUpperCase() === 'DONE' ? 'Done' : 'Pending';
+        cleanedRow.dispatchDate = parseDate(row["Dispatch date"] || row["Material Dispatch Date (Karnal to Maharashtra)"]) || '';
+        cleanedRow.vehicleNo = ''; // Not available
+        cleanedRow.driverInfo = ''; // Not available
+        cleanedRow.installationStatus = row["Install"]?.trim()?.toUpperCase() === 'DONE' ? 'Completed' :
+                                       row["Install"]?.trim()?.toUpperCase() === 'PENDING' ? 'Pending' :
+                                       row["Install"]?.trim()?.toUpperCase() === 'ALBAD' ? 'Issue' :
+                                       row["Installation"]?.trim()?.toUpperCase() === 'DONE' ? 'Completed' : 'Pending';
+        cleanedRow.installationRemark = row["Install"]?.includes('ISSUE') ? row["Install"] : '';
+        cleanedRow.icrStatus = row["ICR"]?.trim()?.toUpperCase() === 'DONE' ? 'Done' : 'Pending';
+        cleanedRow.id = cleanedRow.beneficiaryId || Math.random().toString(36).substr(2, 9);
+        return cleanedRow;
+      }).filter(row => row.beneficiaryId && row.name);
+    };
+
+    // Main App component
+    const App = () => {
+      const [user, setUser] = useState(null);
+      const [role, setRole] = useState(null);
+      const [farmers, setFarmers] = useState([]);
+      const [messages, setMessages] = useState([]);
+      const [newMessage, setNewMessage] = useState('');
+      const [selectedFarmer, setSelectedFarmer] = useState(null);
+      const [error, setError] = useState(null);
+      const [loading, setLoading] = useState(true);
+
+      useEffect(() => {
+        // Mock user authentication
+        const mockUser = { id: 1, name: 'Admin User', role: 'Admin' };
+        setUser(mockUser);
+        setRole(mockUser.role);
+
+        // Load Excel data
+        Promise.all([
+          loadFileData('Copy of MASTER LIST(1).xlsx/MTS+Sadbhav(1228)'),
+          loadFileData('Copy of MASTER LIST(1).xlsx/Saylip(484)')
+        ])
+          .then(([mtsData, saylipData]) => {
+            const parsedMts = Papa.parse(mtsData, {
+              header: true,
+              skipEmptyLines: true,
+              transformHeader: header => header.trim().replace(/^"|"$/g, ''),
+              transform: value => value.trim().replace(/^"|"$/g, '')
+            }).data;
+            const parsedSaylip = Papa.parse(saylipData, {
+              header: true,
+              skipEmptyLines: true,
+              transformHeader: header => header.trim().replace(/^"|"$/g, ''),
+              transform: value => value.trim().replace(/^"|"$/g, '')
+            }).data;
+
+            const combinedData = [...parsedMts, ...parsedSaylip];
+            const cleanedData = processFarmerData(combinedData);
+            setFarmers(cleanedData);
+            setLoading(false);
+          })
+          .catch(err => {
+            console.error('Error loading data:', err);
+            setError('Failed to load farmer data');
+            setFarmers([]);
+            setLoading(false);
+          });
+
+        // Socket.IO chat
+        socket.on('receiveMessage', (message) => {
+          setMessages((prev) => [...prev, message]);
+        });
+
+        return () => socket.off('receiveMessage');
+      }, []);
+
+      const sendMessage = () => {
+        if (newMessage.trim()) {
+          const message = {
+            userId: user.id,
+            userName: user.name,
+            content: newMessage,
+            timestamp: new Date().toISOString(),
+            tags: extractTags(newMessage),
+            mentions: extractMentions(newMessage),
+            farmerId: selectedFarmer?.id || null
+          };
+          socket.emit('sendMessage', message);
+          setNewMessage('');
+        }
+      };
+
+      const extractTags = (text) => text.match(/#[^\s]+/g) || [];
+      const extractMentions = (text) => text.match(/@[^\s]+/g) || [];
+
+      const updateFarmerStatus = (farmerId, updates) => {
+        const updatedFarmers = farmers.map(f => f.id === farmerId ? { ...f, ...updates } : f);
+        setFarmers(updatedFarmers);
+      };
+
+      // Chart data for installation status by scheme
+      const statusByScheme = farmers.reduce((acc, farmer) => {
+        const scheme = farmer.scheme || 'Unknown';
+        acc[scheme] = acc[scheme] || { Completed: 0, Pending: 0, Issue: 0 };
+        if (farmer.installationStatus === 'Completed') acc[scheme].Completed += 1;
+        else if (farmer.installationStatus === 'Pending') acc[scheme].Pending += 1;
+        else if (farmer.installationStatus === 'Issue') acc[scheme].Issue += 1;
+        return acc;
+      }, {});
+
+      const schemeChartData = Object.keys(statusByScheme).map(scheme => ({
+        scheme,
+        Completed: statusByScheme[scheme].Completed,
+        Pending: statusByScheme[scheme].Pending,
+        Issue: statusByScheme[scheme].Issue
+      }));
+
+      // Chart data for installation status by circle
+      const statusByCircle = farmers.reduce((acc, farmer) => {
+        const circle = farmer.circleName || 'Unknown';
+        acc[circle] = acc[circle] || { Completed: 0, Pending: 0, Issue: 0 };
+        if (farmer.installationStatus === 'Completed') acc[circle].Completed += 1;
+        else if (farmer.installationStatus === 'Pending') acc[circle].Pending += 1;
+        else if (farmer.installationStatus === 'Issue') acc[circle].Issue += 1;
+        return acc;
+      }, {});
+
+      const circleChartData = Object.keys(statusByCircle).map(circle => ({
+        circle,
+        Completed: statusByCircle[circle].Completed,
+        Pending: statusByCircle[circle].Pending,
+        Issue: statusByCircle[circle].Issue
+      }));
+
+      return (
+        <div className="min-h-screen bg-gray-100">
+          <header className="bg-blue-600 text-white p-4 shadow-md">
+            <h1 className="text-2xl font-bold">Jyoti Electrotech Platform</h1>
+            <p className="text-sm">Welcome, {user?.name} ({role})</p>
+          </header>
+          <main className="container mx-auto p-4">
+            {loading && <div className="text-center text-gray-500">Loading data...</div>}
+            {error && <div className="bg-red-100 text-red-700 p-4 rounded mb-4">{error}</div>}
+            {!loading && role === 'Admin' && (
+              <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+                <div className="lg:col-span-2 space-y-6">
+                  <div className="bg-white p-6 rounded-lg shadow">
+                    <h2 className="text-xl font-semibold mb-4">Farmer Management</h2>
+                    <FarmerForm onSubmit={(data) => {
+                      const newFarmer = { ...data, id: Math.random().toString(36).substr(2, 9) };
+                      setFarmers([...farmers, newFarmer]);
+                    }} />
+                  </div>
+                  <div className="bg-white p-6 rounded-lg shadow">
+                    <h2 className="text-xl font-semibold mb-4">Dashboard</h2>
+                    <h3 className="text-lg font-medium mb-2">Installation Status by Scheme</h3>
+                    <Recharts.ResponsiveContainer width="100%" height={300}>
+                      <Recharts.BarChart data={schemeChartData}>
+                        <Recharts.CartesianGrid strokeDasharray="3 3" />
+                        <Recharts.XAxis dataKey="scheme" fontSize={12} />
+                        <Recharts.YAxis fontSize={12} />
+                        <Recharts.Tooltip />
+                        <Recharts.Legend />
+                        <Recharts.Bar dataKey="Completed" fill="#4CAF50" />
+                        <Recharts.Bar dataKey="Pending" fill="#FF9800" />
+                        <Recharts.Bar dataKey="Issue" fill="#F44336" />
+                      </Recharts.BarChart>
+                    </Recharts.ResponsiveContainer>
+                    <h3 className="text-lg font-medium mb-2 mt-6">Installation Status by Circle</h3>
+                    <Recharts.ResponsiveContainer width="100%" height={300}>
+                      <Recharts.BarChart data={circleChartData}>
+                        <Recharts.CartesianGrid strokeDasharray="3 3" />
+                        <Recharts.XAxis dataKey="circle" fontSize={12} angle={-45} textAnchor="end" />
+                        <Recharts.YAxis fontSize={12} />
+                        <Recharts.Tooltip />
+                        <Recharts.Legend />
+                        <Recharts.Bar dataKey="Completed" fill="#4CAF50" />
+                        <Recharts.Bar dataKey="Pending" fill="#FF9800" />
+                        <Recharts.Bar dataKey="Issue" fill="#F44336" />
+                      </Recharts.BarChart>
+                    </Recharts.ResponsiveContainer>
+                  </div>
+                  <div className="bg-white p-6 rounded-lg shadow">
+                    <h2 className="text-xl font-semibold mb-4">Farmer List</h2>
+                    <FarmerList
+                      farmers={farmers}
+                      onSelect={setSelectedFarmer}
+                      onUpdateStatus={updateFarmerStatus}
+                    />
+                  </div>
+                </div>
+                <div className="bg-white p-6 rounded-lg shadow">
+                  <h2 className="text-xl font-semibold mb-4">Chat</h2>
+                  <ChatBox messages={messages} selectedFarmer={selectedFarmer} />
+                  <div className="mt-4">
+                    <input
+                      type="text"
+                      value={newMessage}
+                      onChange={(e) => setNewMessage(e.target.value)}
+                      className="border p-2 w-full rounded focus:outline-none focus:ring-2 focus:ring-blue-500"
+                      placeholder="Type a message... #dispatch @user"
+                    />
+                    <button
+                      onClick={sendMessage}
+                      className="mt-2 bg-blue-600 text-white p-2 rounded w-full hover:bg-blue-700 transition"
+                    >
+                      Send
+                    </button>
+                  </div>
+                </div>
+              </div>
+            )}
+            {!loading && role === 'Customer' && (
+              <div className="bg-white p-6 rounded-lg shadow">
+                <h2 className="text-xl font-semibold mb-4">Your Profile</h2>
+                <FarmerProfile farmer={farmers.find(f => f.id === user.id)} />
+              </div>
+            )}
+          </main>
+        </div>
+      );
+    };
+
+    // FarmerForm component
+    const FarmerForm = ({ onSubmit }) => {
+      const [formData, setFormData] = useState({
+        beneficiaryId: '',
+        name: '',
+        phoneNo: '',
+        scheme: '',
+        selectionDate: '',
+        circleName: '',
+        talukaName: '',
+        villageName: '',
+        installer: '',
+        jsrStatus: '',
+        dispatchStatus: '',
+        dispatchDate: '',
+        vehicleNo: '',
+        driverInfo: '',
+        installationStatus: '',
+        installationRemark: '',
+        icrStatus: ''
+      });
+
+      const handleSubmit = (e) => {
+        e.preventDefault();
+        onSubmit(formData);
+        setFormData({
+          beneficiaryId: '',
+          name: '',
+          phoneNo: '',
+          scheme: '',
+          selectionDate: '',
+          circleName: '',
+          talukaName: '',
+          villageName: '',
+          installer: '',
+          jsrStatus: '',
+          dispatchStatus: '',
+          dispatchDate: '',
+          vehicleNo: '',
+          driverInfo: '',
+          installationStatus: '',
+          installationRemark: '',
+          icrStatus: ''
+        });
+      };
+
+      return (
+        <form onSubmit={handleSubmit} className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+          <input
+            type="text"
+            placeholder="Beneficiary ID"
+            value={formData.beneficiaryId}
+            onChange={(e) => setFormData({ ...formData, beneficiaryId: e.target.value })}
+            className="border p-2 rounded focus:outline-none focus:ring-2 focus:ring-blue-500"
+          />
+          <input
+            type="text"
+            placeholder="Name"
+            value={formData.name}
+            onChange={(e) => setFormData({ ...formData, name: e.target.value })}
+            className="border p-2 rounded focus:outline-none focus:ring-2 focus:ring-blue-500"
+          />
+          <input
+            type="text"
+            placeholder="Phone No"
+            value={formData.phoneNo}
+            onChange={(e) => setFormData({ ...formData, phoneNo: e.target.value })}
+            className="border p-2 rounded focus:outline-none focus:ring-2 focus:ring-blue-500"
+          />
+          <select
+            value={formData.scheme}
+            onChange={(e) => setFormData({ ...formData, scheme: e.target.value })}
+            className="border p-2 rounded focus:outline-none focus:ring-2 focus:ring-blue-500"
+          >
+            <option value="">Select Scheme</option>
+            <option value="MTS">MTS</option>
+            <option value="SADBHAV">SADBHAV</option>
+            <option value="SAYLIP">SAYLIP</option>
+            <option value="CROMPTON">CROMPTON</option>
+          </select>
+          <input
+            type="date"
+            placeholder="Selection Date"
+            value={formData.selectionDate}
+            onChange={(e) => setFormData({ ...formData, selectionDate: e.target.value })}
+            className="border p-2 rounded focus:outline-none focus:ring-2 focus:ring-blue-500"
+          />
+          <input
+            type="text"
+            placeholder="Circle Name"
+            value={formData.circleName}
+            onChange={(e) => setFormData({ ...formData, circleName: e.target.value })}
+            className="border p-2 rounded focus:outline-none focus:ring-2 focus:ring-blue-500"
+          />
+          <button
+            type="submit"
+            className="bg-green-600 text-white p-2 rounded hover:bg-green-700 transition sm:col-span-2"
+          >
+            Add Farmer
+          </button>
+        </form>
+      );
+    };
+
+    // FarmerList component
+    const FarmerList = ({ farmers, onSelect, onUpdateStatus }) => (
+      <div className="overflow-x-auto">
+        <table className="min-w-full border bg-white">
+          <thead className="bg-gray-200">
+            <tr>
+              <th className="border p-3 text-left">ID</th>
+              <th className="border p-3 text-left">Name</th>
+              <th className="border p-3 text-left">Phone</th>
+              <th className="border p-3 text-left">Scheme</th>
+              <th className="border p-3 text-left">Status</th>
+            </tr>
+          </thead>
+          <tbody>
+            {Array.isArray(farmers) && farmers.length > 0 ? (
+              farmers.map(farmer => (
+                <tr
+                  key={farmer.id}
+                  onClick={() => onSelect(farmer)}
+                  className="cursor-pointer hover:bg-gray-50"
+                >
+                  <td className="border p-3">{farmer.beneficiaryId}</td>
+                  <td className="border p-3">{farmer.name}</td>
+                  <td className="border p-3">{farmer.phoneNo}</td>
+                  <td className="border p-3">{farmer.scheme}</td>
+                  <td className="border p-3">
+                    <select
+                      value={farmer.installationStatus || 'Pending'}
+                      onChange={(e) => onUpdateStatus(farmer.id, { installationStatus: e.target.value })}
+                      className="border p-1 rounded focus:outline-none focus:ring-2 focus:ring-blue-500"
+                    >
+                      <option value="Pending">Pending</option>
+                      <option value="In Progress">In Progress</option>
+                      <option value="Completed">Completed</option>
+                      <option value="Issue">Issue</option>
+                    </select>
+                  </td>
+                </tr>
+              ))
+            ) : (
+              <tr>
+                <td colSpan="5" className="border p-3 text-center text-gray-500">
+                  No farmers found
+                </td>
+              </tr>
+            )}
+          </tbody>
+        </table>
+      </div>
+    );
+
+    // ChatBox component
+    const ChatBox = ({ messages, selectedFarmer }) => (
+      <div className="border h-96 overflow-y-auto p-4 bg-gray-50 rounded">
+        {selectedFarmer && (
+          <div className="bg-blue-100 p-2 mb-2 rounded">
+            <strong>Selected Farmer:</strong> {selectedFarmer.name} ({selectedFarmer.beneficiaryId})
+          </div>
+        )}
+        {messages.map((msg, index) => (
+          <div key={index} className="mb-3">
+            <div className="flex items-start">
+              <div className="bg-blue-500 text-white rounded-full w-8 h-8 flex items-center justify-center mr-2">
+                {msg.userName[0]}
+              </div>
+              <div>
+                <strong>{msg.userName}</strong> 
+                <span className="text-gray-500 text-sm ml-2">
+                  ({new Date(msg.timestamp).toLocaleString()})
+                </span>
+                {msg.farmerId && (
+                  <span className="text-blue-600 ml-2">
+                    [Farmer: {farmers.find(f => f.id === msg.farmerId)?.beneficiaryId || 'Unknown'}]
+                  </span>
+                )}
+                <p>{msg.content}</p>
+                {msg.tags.length > 0 && (
+                  <span className="text-blue-500 text-sm">{msg.tags.join(' ')}</span>
+                )}
+                {msg.mentions.length > 0 && (
+                  <span className="text-green-500 text-sm ml-2">{msg.mentions.join(' ')}</span>
+                )}
+              </div>
+            </div>
+          </div>
+        ))}
+      </div>
+    );
+
+    // FarmerProfile component
+    const FarmerProfile = ({ farmer }) => (
+      <div className="space-y-2">
+        {farmer ? (
+          <>
+            <p><strong>ID:</strong> {farmer.beneficiaryId}</p>
+            <p><strong>Name:</strong> {farmer.name}</p>
+            <p><strong>Phone:</strong> {farmer.phoneNo}</p>
+            <p><strong>Scheme:</strong> {farmer.scheme}</p>
+            <p><strong>Circle:</strong> {farmer.circleName}</p>
+            <p><strong>Taluka:</strong> {farmer.talukaName}</p>
+            <p><strong>Village:</strong> {farmer.villageName}</p>
+            <p><strong>Installation Status:</strong> {farmer.installationStatus}</p>
+            {farmer.installationRemark && (
+              <p><strong>Remark:</strong> {farmer.installationRemark}</p>
+            )}
+          </>
+        ) : (
+          <p className="text-gray-500">No profile data available</p>
+        )}
+      </div>
+    );
+
+    // Render the app
+    const root = ReactDOM.createRoot(document.getElementById('root'));
+    root.render(<App />);
+  </script>
+</body>
+</html>
