@@ -1,6 +1,6 @@
 # Project_jyoti
 
-# Project Moriarty - Backend API
+ - Backend API
 
 A FastAPI-based backend for the Project Moriarty farmer management system.
 
