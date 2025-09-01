@@ -8,7 +8,7 @@ from pathlib import Path
 
 from app.core.config import settings
 from app.core.database import engine, Base
-from app.api import auth, farmers, tasks, chat, dashboard, users
+from app.api import auth, farmers, tasks, chat, dashboard, users, inventory
 
 # Create database tables
 Base.metadata.create_all(bind=engine)
@@ -54,6 +54,7 @@ app.include_router(farmers.router, prefix="/api/farmers", tags=["Farmers"])
 app.include_router(tasks.router, prefix="/api/tasks", tags=["Tasks"])
 app.include_router(chat.router, prefix="/api/chat", tags=["Chat"])
 app.include_router(dashboard.router, prefix="/api/dashboard", tags=["Dashboard"])
+app.include_router(inventory.router, prefix="/api/inventory", tags=["Inventory"])
 
 # Health check endpoint
 @app.get("/health")
